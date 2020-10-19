@@ -1,0 +1,18 @@
+{
+  "name": "@blockstack/stx-supply-schedule",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/index.js",
+  "scripts": {
+    "output": "ts-node src/index.ts"
+  },
+  "keywords": [],
+  "author": "Matthew Little",
+  "license": "ISC",
+  "dependencies": {
+    "@types/pg": "^7.14.5",
+    "pg": "^8.4.1",
+    "ts-node": "^9.0.0",
+    "typescript": "^4.0.3"
+  }
+}
