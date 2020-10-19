@@ -9,7 +9,6 @@ const STX_TOTAL_TXS_AT_BLOCK_QUERY = `
       WHERE type = 'STACKS' 
       AND address !~ '(-|_)' 
       AND length(address) BETWEEN 33 AND 34 
-      AND receive_whitelisted = '1' 
       AND lock_transfer_block_id <= $1
       ORDER BY address, block_id DESC, vtxindex DESC 
   )
@@ -28,7 +27,6 @@ const STX_LATEST_TOTAL_TXS_QUERY = `
         WHERE type = 'STACKS' 
         AND address !~ '(-|_)' 
         AND length(address) BETWEEN 33 AND 34 
-        AND receive_whitelisted = '1' 
         AND lock_transfer_block_id <= (SELECT * from block_height) 
         ORDER BY address, block_id DESC, vtxindex DESC 
     )
@@ -111,9 +109,12 @@ async function run() {
 
   // output to csv
   const fd = fs.openSync('supply.csv', 'w');
-  fs.writeSync(fd, 'block_height,total,vested\r\n');
+  fs.writeSync(fd, 'block_height,unlocked_micro_stx,unlocked_stx,vested\r\n');
   for (const entry of totals) {
-    fs.writeSync(fd, `${entry.block_height},${entry.total_calculated},${entry.vested_micro_stx}\r\n`);
+    const stxInt = entry.total_calculated.toString().slice(0, -6);
+    const stxFrac = entry.total_calculated.toString().slice(-6);
+    const stxStr = `${stxInt}.${stxFrac}`;
+    fs.writeSync(fd, `${entry.block_height},${entry.total_calculated},${stxStr},${entry.vested_micro_stx}\r\n`);
   }
   fs.closeSync(fd);
 
