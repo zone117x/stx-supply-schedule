@@ -73,7 +73,7 @@ async function run() {
   const lockTransferBlockHeights = lockTransferBlockHeightsRes.rows.map(r => parseInt(r.block_id));
 
   // the last block height where stx liquid supply changes
-  const lastBlockHeight = Math.max(lockTransferBlockHeights.slice(-1)[0], vestingBlockHeights.slice(-1)[0]);
+  const lastBlockHeight = Math.max(lockTransferBlockHeights.slice(-1)[0], vestingBlockHeights.slice(-1)[0]) + 5;
 
   // final unlocked supplies by block height
   const totals: { block_height: number; queried_micro_stx: bigint; vested_micro_stx: bigint; total_calculated: bigint }[] = [];
