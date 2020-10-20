@@ -13,7 +13,7 @@ const STX_TOTAL_TXS_AT_BLOCK_QUERY = `
       ORDER BY address, block_id DESC, vtxindex DESC 
   )
   SELECT SUM(
-    CAST(totals.credit_value AS bigint) - CAST(totals.debit_value AS bigint)
+    CAST(totals.credit_value AS numeric) - CAST(totals.debit_value AS numeric)
   ) AS val FROM totals
 `;
 
@@ -22,11 +22,17 @@ const STX_LATEST_BLOCK_HEIGHT_QUERY = `
 `;
 
 const STX_VESTED_BY_BLOCK_QUERY = `
-  SELECT SUM(CAST(vesting_value as bigint)) as micro_stx, block_id
+  SELECT SUM(CAST(vesting_value as numeric)) as micro_stx, block_id
   FROM account_vesting
   WHERE type = 'STACKS'
   GROUP BY block_id
   ORDER BY block_id ASC
+`;
+
+const STX_TOTAL_VESTED_BY_BLOCK_QUERY = `
+  SELECT SUM(CAST(vesting_value as numeric)) as micro_stx
+  FROM account_vesting
+  WHERE type = 'STACKS' AND block_id <= $1 AND block_id > $2
 `;
 
 const LOCK_TRANSFER_BLOCK_IDS_QUERY = `
@@ -70,11 +76,16 @@ async function run() {
       total_calculated: 0n, 
       date_time: blockTimestamp
     };
-    total.vested_micro_stx = totals[totals.length - 1]?.vested_micro_stx ?? 0n;
-    const vestingBlock = vestingResults.find(r => r.block_height === blockHeight);
-    if (vestingBlock) {
-      total.vested_micro_stx += vestingBlock.micro_stx;
+
+    if (vestingBlockHeights.includes(blockHeight)) {
+      // stx vesting at this block, query for total vested amount up until this block
+      const vestingRes = await client.query<{micro_stx: string}>(STX_TOTAL_VESTED_BY_BLOCK_QUERY, [blockHeight, currentBlockHeight]);
+      total.vested_micro_stx = BigInt(vestingRes.rows[0].micro_stx);
+    } else {
+      // no stx vesting at this block, so reuse last known total vested amount
+      total.vested_micro_stx = totals[totals.length - 1]?.vested_micro_stx ?? 0n;
     }
+
     if (lockTransferBlockHeights.includes(blockHeight)) {
       const res = await client.query<{val: string}>(STX_TOTAL_TXS_AT_BLOCK_QUERY, [blockHeight]);
       total.queried_micro_stx = BigInt(res.rows[0].val);
