@@ -39,6 +39,7 @@ async function run() {
   await client.connect()
 
   const currentBlockHeight = (await client.query<{block_id: number}>(STX_LATEST_BLOCK_HEIGHT_QUERY)).rows[0].block_id;
+  const currentDate = Math.round(Date.now() / 1000)
   const res = await client.query<{val: string}>(STX_TOTAL_TXS_AT_BLOCK_QUERY, [currentBlockHeight]);
   const currentStxSupply = BigInt(res.rows[0].val);
 
@@ -58,9 +59,17 @@ async function run() {
   const lastBlockHeight = Math.max(lockTransferBlockHeights.slice(-1)[0], vestingBlockHeights.slice(-1)[0]) + 5;
 
   // final unlocked supplies by block height
-  const totals: { block_height: number; queried_micro_stx: bigint; vested_micro_stx: bigint; total_calculated: bigint }[] = [];
+  const totals: { block_height: number; queried_micro_stx: bigint; vested_micro_stx: bigint; total_calculated: bigint; date_time: string }[] = [];
   for (let blockHeight = currentBlockHeight; blockHeight < lastBlockHeight; blockHeight++) {
-    const total = { block_height: blockHeight, queried_micro_stx: 0n, vested_micro_stx: 0n, total_calculated: 0n };
+    const blockTimePassed = (blockHeight - currentBlockHeight) * 10 * 60;
+    const blockTimestamp = new Date((currentDate + blockTimePassed) * 1000).toISOString();
+    const total = { 
+      block_height: blockHeight, 
+      queried_micro_stx: 0n, 
+      vested_micro_stx: 0n, 
+      total_calculated: 0n, 
+      date_time: blockTimestamp
+    };
     total.vested_micro_stx = totals[totals.length - 1]?.vested_micro_stx ?? 0n;
     const vestingBlock = vestingResults.find(r => r.block_height === blockHeight);
     if (vestingBlock) {
@@ -91,14 +100,21 @@ async function run() {
     }
   }
 
+  // prune blocks where supply didn't change
+  for (let i = totals.length - 1; i > 0; i--) {
+    if (totals[i].total_calculated === totals[i - 1].total_calculated) {
+      totals.splice(i, 1);
+    }
+  }
+
   // output to csv
   const fd = fs.openSync('supply.csv', 'w');
-  fs.writeSync(fd, 'block_height,unlocked_micro_stx,unlocked_stx\r\n');
+  fs.writeSync(fd, 'block_height,unlocked_micro_stx,unlocked_stx,estimated_time\r\n');
   for (const entry of totals) {
     const stxInt = entry.total_calculated.toString().slice(0, -6);
     const stxFrac = entry.total_calculated.toString().slice(-6);
     const stxStr = `${stxInt}.${stxFrac}`;
-    fs.writeSync(fd, `${entry.block_height},${entry.total_calculated},${stxStr}\r\n`);
+    fs.writeSync(fd, `${entry.block_height},${entry.total_calculated},${stxStr},${entry.date_time}\r\n`);
   }
   fs.closeSync(fd);
 
