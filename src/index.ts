@@ -2,19 +2,25 @@ import * as fs from 'fs';
 import * as assert from 'assert';
 import { Client } from 'pg';
 
-const STX_TOTAL_TXS_AT_BLOCK_QUERY = `
-  WITH totals AS (
-    SELECT DISTINCT ON (address) credit_value, debit_value 
-      FROM accounts 
+const STX_TOTAL_AT_BLOCK_QUERY = `
+  SELECT SUM(balance) balance FROM (
+    SELECT 
+    DISTINCT addrs.address,
+      accts.block_id,
+      accts.lock_transfer_block_id,
+      (accts.credit_value::numeric - accts.debit_value::numeric) balance
+    FROM accounts addrs
+    JOIN LATERAL (
+      SELECT * FROM accounts
       WHERE type = 'STACKS' 
-      AND address !~ '(-|_)' 
-      AND length(address) BETWEEN 33 AND 34
-      AND lock_transfer_block_id <= $1
-      ORDER BY address, block_id DESC, vtxindex DESC 
-  )
-  SELECT SUM(
-    CAST(totals.credit_value AS numeric) - CAST(totals.debit_value AS numeric)
-  ) AS val FROM totals
+        AND address = addrs.address 
+        AND lock_transfer_block_id <= $1 
+        AND block_id <= $1
+      ORDER BY block_id DESC, vtxindex DESC
+      LIMIT 1
+    ) accts ON true
+    ORDER BY block_id DESC
+  ) balances
 `;
 
 const STX_LATEST_BLOCK_HEIGHT_QUERY = `
@@ -22,7 +28,7 @@ const STX_LATEST_BLOCK_HEIGHT_QUERY = `
 `;
 
 const STX_VESTED_BY_BLOCK_QUERY = `
-  SELECT SUM(CAST(vesting_value as numeric)) as micro_stx, block_id
+  SELECT SUM(vesting_value::numeric) as micro_stx, block_id
   FROM account_vesting
   WHERE type = 'STACKS'
   GROUP BY block_id
@@ -30,7 +36,7 @@ const STX_VESTED_BY_BLOCK_QUERY = `
 `;
 
 const STX_TOTAL_VESTED_BY_BLOCK_QUERY = `
-  SELECT SUM(CAST(vesting_value as numeric)) as micro_stx
+  SELECT SUM(vesting_value::numeric) as micro_stx
   FROM account_vesting
   WHERE type = 'STACKS' AND block_id <= $1 AND block_id > $2
 `;
@@ -46,8 +52,6 @@ async function run() {
 
   const currentBlockHeight = (await client.query<{block_id: number}>(STX_LATEST_BLOCK_HEIGHT_QUERY)).rows[0].block_id;
   const currentDate = Math.round(Date.now() / 1000)
-  const res = await client.query<{val: string}>(STX_TOTAL_TXS_AT_BLOCK_QUERY, [currentBlockHeight]);
-  const currentStxSupply = BigInt(res.rows[0].val);
 
   // block heights where vesting stx unlock (and become liquid)
   const vestedByBlockRes = await client.query<{block_id: string, micro_stx: string;}>(STX_VESTED_BY_BLOCK_QUERY);
@@ -86,11 +90,9 @@ async function run() {
       total.vested_micro_stx = totals[totals.length - 1]?.vested_micro_stx ?? 0n;
     }
 
-    if (lockTransferBlockHeights.includes(blockHeight)) {
-      const res = await client.query<{val: string}>(STX_TOTAL_TXS_AT_BLOCK_QUERY, [blockHeight]);
-      total.queried_micro_stx = BigInt(res.rows[0].val);
-    } if (total.block_height === currentBlockHeight) {
-      total.queried_micro_stx = currentStxSupply;
+    if (lockTransferBlockHeights.includes(blockHeight) || total.block_height === currentBlockHeight) {
+      const res = await client.query<{balance: string}>(STX_TOTAL_AT_BLOCK_QUERY, [blockHeight]);
+      total.queried_micro_stx = BigInt(res.rows[0].balance);
     } else {
       // no change in unlocked balances so use previous block's
       total.queried_micro_stx = totals[totals.length - 1].queried_micro_stx;
@@ -118,6 +120,12 @@ async function run() {
     }
   }
 
+  const finalSupply = totals[totals.length - 1].total_calculated.toString()
+    .slice(0, -6)
+    .replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  console.log(`Final supply:\n${finalSupply}`);
+  assert.strictEqual(finalSupply, '1,352,464,598', 'incorrect final unlocked balance');
+
   // output to csv
   const fd = fs.openSync('supply.csv', 'w');
   fs.writeSync(fd, 'block_height,unlocked_micro_stx,unlocked_stx,estimated_time\r\n');
@@ -136,4 +144,5 @@ async function run() {
 run().catch(error => {
   console.error(error);
   throw error;
+  process.exit(1);
 });
