@@ -3,23 +3,14 @@ import * as assert from 'assert';
 import { Client } from 'pg';
 
 const STX_TOTAL_AT_BLOCK_QUERY = `
-  SELECT SUM(balance) balance FROM (
-    SELECT 
-    DISTINCT addrs.address,
-      accts.block_id,
-      accts.lock_transfer_block_id,
-      (accts.credit_value::numeric - accts.debit_value::numeric) balance
-    FROM accounts addrs
-    JOIN LATERAL (
-      SELECT * FROM accounts
-      WHERE type = 'STACKS' 
-        AND address = addrs.address 
-        AND lock_transfer_block_id <= $1 
-        AND block_id <= $1
-      ORDER BY block_id DESC, vtxindex DESC
-      LIMIT 1
-    ) accts ON true
-    ORDER BY block_id DESC
+  SELECT SUM(balances.credit_value::numeric - balances.debit_value::numeric) balance
+  FROM (
+    SELECT DISTINCT ON (address) address, credit_value, debit_value 
+    FROM accounts 
+    WHERE type = 'STACKS' 
+    AND lock_transfer_block_id <= $1
+    AND block_id <= $1
+    ORDER BY address, block_id DESC, vtxindex DESC 
   ) balances
 `;
 
