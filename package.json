@@ -11,6 +11,7 @@
   "license": "ISC",
   "dependencies": {
     "@types/pg": "^7.14.5",
+    "c32check": "^1.1.2",
     "pg": "^8.4.1",
     "ts-node": "^9.0.0",
     "typescript": "^4.0.3"

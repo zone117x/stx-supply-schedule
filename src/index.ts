@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as assert from 'assert';
 import { Client } from 'pg';
+import * as c32check from 'c32check';
 
 const STX_TOTAL_AT_BLOCK_QUERY = `
   SELECT SUM(balances.credit_value::numeric - balances.debit_value::numeric) balance
@@ -12,6 +13,18 @@ const STX_TOTAL_AT_BLOCK_QUERY = `
     AND block_id <= $1
     ORDER BY address, block_id DESC, vtxindex DESC 
   ) balances
+`;
+
+const GET_PLACEHOLDER_ACCOUNTS_QUERY = `
+  SELECT address, accts.amount
+  FROM (
+    SELECT DISTINCT ON (address)
+    address, (credit_value::numeric - debit_value::numeric) amount 
+    FROM accounts 
+    WHERE type = 'STACKS' AND NOT address !~ '(-|_)'
+    AND credit_value::numeric - debit_value::numeric > 0
+    ORDER BY address, block_id DESC, vtxindex DESC 
+  ) accts
 `;
 
 const STX_LATEST_BLOCK_HEIGHT_QUERY = `
@@ -32,10 +45,39 @@ const STX_TOTAL_VESTED_BY_BLOCK_QUERY = `
   WHERE type = 'STACKS' AND block_id <= $1 AND block_id > $2
 `;
 
+const GET_PLACEHOLDER_VESTING_ADDRESSES_QUERY = `
+  SELECT address, vesting_value as amount
+  FROM account_vesting
+  WHERE type = 'STACKS' AND NOT address !~ '(-|_)'
+`;
+
 const LOCK_TRANSFER_BLOCK_IDS_QUERY = `
   SELECT distinct(lock_transfer_block_id) as block_id FROM ACCOUNTS
   ORDER BY lock_transfer_block_id ASC
 `;
+
+function isValidBtcAddress(address: string): boolean {
+  if (address.length < 26 || address.length > 35) {
+    return false;
+  }
+  try {
+    const addr = c32check.b58ToC32(address)
+    return !!addr;
+  } catch (error) {
+    return false;
+  }
+}
+
+function microStxToStx(microStx: string): string {
+  const padded = microStx.padStart(7, '0');
+  const stxInt = padded.slice(0, -6);
+  const stxFrac = padded.slice(-6);
+  return `${stxInt}.${stxFrac}`;
+}
+
+function microStxToReadable(microStx: string): string {
+  return microStx.padStart(7, '0').slice(0, -6).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
 
 async function run() {
   const client = new Client();
@@ -43,6 +85,29 @@ async function run() {
 
   const currentBlockHeight = (await client.query<{block_id: number}>(STX_LATEST_BLOCK_HEIGHT_QUERY)).rows[0].block_id;
   const currentDate = Math.round(Date.now() / 1000)
+
+  // get all account balances with placeholder addresses -- query ensures they are already unique
+  const placeholderAccounts = (await client.query<{address: string; amount: string}>(GET_PLACEHOLDER_ACCOUNTS_QUERY))
+    .rows
+    .filter(r => !isValidBtcAddress(r.address));
+
+  // get all vesting accounts with placeholder addresses -- these must be aggregated for total balances
+  const placeholderVestingMap = new Map<string, bigint>();
+  (await client.query<{address: string; amount: string}>(GET_PLACEHOLDER_VESTING_ADDRESSES_QUERY))
+    .rows
+    .filter(r => !isValidBtcAddress(r.address))
+    .map(r => ({ address: r.address, amount: BigInt(r.amount) }))
+    .forEach(r => {
+      const amount = (placeholderVestingMap.get(r.address) ?? 0n) + r.amount;
+      placeholderVestingMap.set(r.address, amount);
+    });
+  const placeholderVesting = [...placeholderVestingMap.entries()]
+    .map(r => ({ address: r[0], amount: r[1].toString() }));
+
+  const totalPlaceholderBalance = [
+    ...placeholderAccounts,
+    ...placeholderVesting
+  ].map(r => BigInt(r.amount)).reduce((a, b) => a + b);
 
   // block heights where vesting stx unlock (and become liquid)
   const vestedByBlockRes = await client.query<{block_id: string, micro_stx: string;}>(STX_VESTED_BY_BLOCK_QUERY);
@@ -111,9 +176,11 @@ async function run() {
     }
   }
 
-  const finalSupply = totals[totals.length - 1].total_calculated.toString()
-    .slice(0, -6)
-    .replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const placeholderBalance = microStxToReadable(totalPlaceholderBalance.toString());
+  console.log(`Amount under placeholder accounts:\n${placeholderBalance}`);
+  assert.strictEqual(placeholderBalance, '4,392,964', 'incorrect placeholder balance');
+
+  const finalSupply = microStxToReadable(totals[totals.length - 1].total_calculated.toString());
   console.log(`Final supply:\n${finalSupply}`);
   assert.strictEqual(finalSupply, '1,352,464,598', 'incorrect final unlocked balance');
 
@@ -121,12 +188,21 @@ async function run() {
   const fd = fs.openSync('supply.csv', 'w');
   fs.writeSync(fd, 'block_height,unlocked_micro_stx,unlocked_stx,estimated_time\r\n');
   for (const entry of totals) {
-    const stxInt = entry.total_calculated.toString().slice(0, -6);
-    const stxFrac = entry.total_calculated.toString().slice(-6);
-    const stxStr = `${stxInt}.${stxFrac}`;
+    const stxStr = microStxToStx(entry.total_calculated.toString());
     fs.writeSync(fd, `${entry.block_height},${entry.total_calculated},${stxStr},${entry.date_time}\r\n`);
   }
   fs.closeSync(fd);
+
+  // output placeholder accounts and balances to CSV
+  const placeholderFd = fs.openSync('placeholders.csv', 'w');
+  fs.writeSync(placeholderFd, 'type,address,stx_amount\r\n');
+  for (const entry of placeholderAccounts) {
+    fs.writeSync(fd, `locked_or_liquid,${entry.address},${microStxToStx(entry.amount)}\r\n`);
+  }
+  for (const entry of placeholderVesting) {
+    fs.writeSync(fd, `vesting,${entry.address},${microStxToStx(entry.amount)}\r\n`);
+  }
+  fs.closeSync(placeholderFd);
 
   await client.end()
 }
