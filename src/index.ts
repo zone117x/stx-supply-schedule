@@ -16,10 +16,10 @@ const STX_TOTAL_AT_BLOCK_QUERY = `
 `;
 
 const GET_PLACEHOLDER_ACCOUNTS_QUERY = `
-  SELECT address, accts.amount
+  SELECT address, accts.amount, accts.block_height
   FROM (
     SELECT DISTINCT ON (address)
-    address, (credit_value::numeric - debit_value::numeric) amount 
+      address, lock_transfer_block_id as block_height, (credit_value::numeric - debit_value::numeric) amount
     FROM accounts 
     WHERE type = 'STACKS' AND NOT address !~ '(-|_)'
     AND credit_value::numeric - debit_value::numeric > 0
@@ -46,7 +46,7 @@ const STX_TOTAL_VESTED_BY_BLOCK_QUERY = `
 `;
 
 const GET_PLACEHOLDER_VESTING_ADDRESSES_QUERY = `
-  SELECT address, vesting_value as amount
+  SELECT address, vesting_value as amount, block_id as block_height
   FROM account_vesting
   WHERE type = 'STACKS' AND NOT address !~ '(-|_)'
 `;
@@ -87,27 +87,25 @@ async function run() {
   const currentDate = Math.round(Date.now() / 1000)
 
   // get all account balances with placeholder addresses -- query ensures they are already unique
-  const placeholderAccounts = (await client.query<{address: string; amount: string}>(GET_PLACEHOLDER_ACCOUNTS_QUERY))
+  const placeholderAccounts = (await client.query<{address: string; amount: string; block_height: string}>(GET_PLACEHOLDER_ACCOUNTS_QUERY))
     .rows
     .filter(r => !isValidBtcAddress(r.address));
 
   // get all vesting accounts with placeholder addresses -- these must be aggregated for total balances
-  const placeholderVestingMap = new Map<string, bigint>();
-  (await client.query<{address: string; amount: string}>(GET_PLACEHOLDER_VESTING_ADDRESSES_QUERY))
+  const placeholderVesting = (await client.query<{address: string; amount: string; block_height: string}>(GET_PLACEHOLDER_VESTING_ADDRESSES_QUERY))
     .rows
-    .filter(r => !isValidBtcAddress(r.address))
-    .map(r => ({ address: r.address, amount: BigInt(r.amount) }))
-    .forEach(r => {
-      const amount = (placeholderVestingMap.get(r.address) ?? 0n) + r.amount;
-      placeholderVestingMap.set(r.address, amount);
-    });
-  const placeholderVesting = [...placeholderVestingMap.entries()]
-    .map(r => ({ address: r[0], amount: r[1].toString() }));
+    .filter(r => !isValidBtcAddress(r.address));
 
   const totalPlaceholderBalance = [
     ...placeholderAccounts,
     ...placeholderVesting
   ].map(r => BigInt(r.amount)).reduce((a, b) => a + b);
+
+  const placeholderMap = new Map<string, bigint>();
+  [...placeholderAccounts, ...placeholderVesting].forEach(r => {
+    const amount = (placeholderMap.get(r.address) ?? 0n) + BigInt(r.amount);
+    placeholderMap.set(r.address, amount);
+  });
 
   // block heights where vesting stx unlock (and become liquid)
   const vestedByBlockRes = await client.query<{block_id: string, micro_stx: string;}>(STX_VESTED_BY_BLOCK_QUERY);
@@ -193,16 +191,24 @@ async function run() {
   }
   fs.closeSync(fd);
 
-  // output placeholder accounts and balances to CSV
-  const placeholderFd = fs.openSync('placeholders.csv', 'w');
-  fs.writeSync(placeholderFd, 'type,address,stx_amount\r\n');
+  // output all entries for placeholder accounts and balances to CSV
+  const placeholderEntriesFd = fs.openSync('placeholder-entries.csv', 'w');
+  fs.writeSync(placeholderEntriesFd, 'type,unlock_or_vest_block,address,stx_amount\r\n');
   for (const entry of placeholderAccounts) {
-    fs.writeSync(fd, `locked_or_liquid,${entry.address},${microStxToStx(entry.amount)}\r\n`);
+    fs.writeSync(fd, `locked_or_liquid,${entry.block_height},${entry.address},${microStxToStx(entry.amount)}\r\n`);
   }
   for (const entry of placeholderVesting) {
-    fs.writeSync(fd, `vesting,${entry.address},${microStxToStx(entry.amount)}\r\n`);
+    fs.writeSync(fd, `vesting,${entry.block_height},${entry.address},${microStxToStx(entry.amount)}\r\n`);
   }
-  fs.closeSync(placeholderFd);
+  fs.closeSync(placeholderEntriesFd);
+
+  // output aggregated (distinct) placeholder addresses and balance to CSV
+  const placeholderUniqueFd = fs.openSync('placeholder-unique.csv', 'w');
+  fs.writeSync(placeholderUniqueFd, 'address,stx_amount\r\n');
+  for (const [address, stx] of placeholderMap) {
+    fs.writeSync(fd, `${address},${microStxToStx(stx.toString())}\r\n`);
+  }
+  fs.closeSync(placeholderUniqueFd);
 
   await client.end()
 }
