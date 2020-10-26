@@ -48,7 +48,7 @@ const STX_TOTAL_VESTED_BY_BLOCK_QUERY = `
 const GET_PLACEHOLDER_VESTING_ADDRESSES_QUERY = `
   SELECT address, vesting_value as amount, block_id as block_height
   FROM account_vesting
-  WHERE type = 'STACKS' AND NOT address !~ '(-|_)'
+  WHERE type = 'STACKS' AND NOT address !~ '(-|_)' AND block_id > $1
 `;
 
 const LOCK_TRANSFER_BLOCK_IDS_QUERY = `
@@ -92,7 +92,7 @@ async function run() {
     .filter(r => !isValidBtcAddress(r.address));
 
   // get all vesting accounts with placeholder addresses -- these must be aggregated for total balances
-  const placeholderVesting = (await client.query<{address: string; amount: string; block_height: string}>(GET_PLACEHOLDER_VESTING_ADDRESSES_QUERY))
+  const placeholderVesting = (await client.query<{address: string; amount: string; block_height: string}>(GET_PLACEHOLDER_VESTING_ADDRESSES_QUERY, [currentBlockHeight]))
     .rows
     .filter(r => !isValidBtcAddress(r.address));
 
@@ -176,7 +176,7 @@ async function run() {
 
   const placeholderBalance = microStxToReadable(totalPlaceholderBalance.toString());
   console.log(`Amount under placeholder accounts:\n${placeholderBalance}`);
-  assert.strictEqual(placeholderBalance, '4,392,964', 'incorrect placeholder balance');
+  assert.strictEqual(placeholderBalance, '3,864,598', 'incorrect placeholder balance');
 
   const finalSupply = microStxToReadable(totals[totals.length - 1].total_calculated.toString());
   console.log(`Final supply:\n${finalSupply}`);
